@@ -1492,96 +1492,103 @@ end)
 plr.CharacterAdded:Connect(function() task.defer(function() ensureChar(); if not mv_on.Value then mv_killBV() end end) end)
 mv_on:OnChanged(function(v) if not v then mv_killBV() end end)
 
--- ===== NoClip (ultra-compact tab) =====
+-- ===== NoClip (safe tab, minimal locals) =====
 do
-    local UIS = game:GetService("UserInputService")
-    local cam = workspace.CurrentCamera
+    local ok, err = pcall(function()
+        -- используем уже существующие Window/Library/Players/RunService из твоего скрипта
+        if not (Window and Window.AddTab and Players and RunService) then return end
 
-    local char, hum, root
-    local function refresh()
-        char = plr.Character or plr.CharacterAdded:Wait()
-        hum  = char:WaitForChild("Humanoid")
-        root = char:WaitForChild("HumanoidRootPart")
-    end
-    refresh()
-    plr.CharacterAdded:Connect(function() task.defer(refresh) end)
+        local UIS = game:GetService("UserInputService")
+        local lp  = Players.LocalPlayer
+        local cam = workspace.CurrentCamera
 
-    local Tab   = Window:AddTab({ Title = "NoClip", Icon = "ghost" })
-    local t_on  = Tab:CreateToggle("nc_on",   { Title = "Enable NoClip", Default=false })
-    local t_hold= Tab:CreateToggle("nc_hold", { Title = "Hold LeftShift (override toggle)", Default=false })
-    local t_gh  = Tab:CreateToggle("nc_ghost",{ Title = "Ghost move (WASD+Q/E)", Default=true })
-    local spd   = Tab:CreateSlider("nc_spd",  { Title = "Speed", Min=6, Max=80, Default=28 })
-    local vspd  = Tab:CreateSlider("nc_vspd", { Title = "Vertical speed", Min=4, Max=50, Default=22 })
-    local t_rot = Tab:CreateToggle("nc_norot",{ Title = "Freeze Humanoid AutoRotate", Default=true })
-    Tab:AddParagraph({Title="Tip",Content="В Hold-режиме просто зажимай LeftShift."})
-
-    local stepConn = nil
-    local function noclipStep()
-        if not char then return end
-        for _,p in ipairs(char:GetDescendants()) do
-            if p:IsA("BasePart") then p.CanCollide=false p.CanTouch=false end
+        local char, hum, root
+        local function refresh()
+            char = lp.Character or lp.CharacterAdded:Wait()
+            hum  = char:WaitForChild("Humanoid")
+            root = char:WaitForChild("HumanoidRootPart")
         end
-        if hum then
-            pcall(function() hum:ChangeState(Enum.HumanoidStateType.Physics) end)
-            hum.AutoRotate = not t_rot.Value and true or false
+        refresh()
+        lp.CharacterAdded:Connect(function() task.defer(refresh) end)
+
+        local Tab   = Window:AddTab({ Title = "NoClip", Icon = "ghost" })
+        local en    = Tab:CreateToggle("nc_on",   { Title = "Enable NoClip", Default = false })
+        local hold  = Tab:CreateToggle("nc_hold", { Title = "Hold LeftShift (priority)", Default = false })
+        local ghost = Tab:CreateToggle("nc_ghost",{ Title = "Ghost move (WASD + Q/E)", Default = true })
+        local spd   = Tab:CreateSlider("nc_spd",  { Title = "Speed", Min = 6, Max = 80, Default = 28 })
+        local vspd  = Tab:CreateSlider("nc_vspd", { Title = "Vertical speed", Min = 4, Max = 50, Default = 22 })
+        local norot = Tab:CreateToggle("nc_norot",{ Title = "Freeze Humanoid AutoRotate", Default = true })
+        Tab:AddParagraph({ Title="Hint", Content="В Hold режиме зажимай LeftShift. Ghost = свободный полёт." })
+
+        -- NoClip loop (отключение коллизий)
+        local stepConn
+        local function setStep(on)
+            if on then
+                if stepConn then stepConn:Disconnect() end
+                stepConn = RunService.Stepped:Connect(function()
+                    if not (char and char.Parent) then return end
+                    for _,p in ipairs(char:GetDescendants()) do
+                        if p:IsA("BasePart") then p.CanCollide=false p.CanTouch=false end
+                    end
+                    if hum then
+                        pcall(function() hum:ChangeState(Enum.HumanoidStateType.Physics) end)
+                        hum.AutoRotate = not norot.Value
+                    end
+                end)
+            else
+                if stepConn then stepConn:Disconnect(); stepConn=nil end
+                if hum then hum.AutoRotate = true end
+            end
         end
-    end
-    local function setStep(on)
-        if on then
-            if stepConn then stepConn:Disconnect() end
-            stepConn = RunService.Stepped:Connect(noclipStep)
-        else
-            if stepConn then stepConn:Disconnect() stepConn=nil end
-            if hum then hum.AutoRotate = true end
+
+        -- Ghost move (BodyVelocity)
+        local hbConn
+        local function getBV() return root and root:FindFirstChild("_NC_BV") end
+        local function killBV() local b=getBV() if b then b:Destroy() end end
+        local function ensureBV()
+            if not root then return end
+            local b=getBV()
+            if not b then
+                b=Instance.new("BodyVelocity")
+                b.Name="_NC_BV"; b.MaxForce=Vector3.new(1e9,1e9,1e9); b.Velocity=Vector3.new()
+                b.Parent=root
+            end
+            return b
         end
-    end
+        if hbConn then hbConn:Disconnect() end
+        hbConn = RunService.Heartbeat:Connect(function()
+            if not (ghost.Value and root) then killBV() return end
+            local b=ensureBV(); if not b then return end
+            local v = Vector3.zero
+            local cf = (cam and cam.CFrame) or root.CFrame
+            local f = Vector3.new(cf.LookVector.X,0,cf.LookVector.Z).Unit
+            local r = Vector3.new(cf.RightVector.X,0,cf.RightVector.Z).Unit
+            local s = spd.Value
+            if UIS:IsKeyDown(Enum.KeyCode.W) then v = v + f*s end
+            if UIS:IsKeyDown(Enum.KeyCode.S) then v = v - f*s end
+            if UIS:IsKeyDown(Enum.KeyCode.D) then v = v + r*s end
+            if UIS:IsKeyDown(Enum.KeyCode.A) then v = v - r*s end
+            local vs = vspd.Value
+            if UIS:IsKeyDown(Enum.KeyCode.E) then v = v + Vector3.new(0,vs,0) end
+            if UIS:IsKeyDown(Enum.KeyCode.Q) then v = v - Vector3.new(0,vs,0) end
+            b.Velocity = v
+        end)
 
-    -- Ghost move via BodyVelocity
-    local hbConn = nil
-    local function bv() return root and root:FindFirstChild("_NC_BV") end
-    local function ensureBV()
-        if not root then return end
-        local o=bv()
-        if o then return o end
-        o=Instance.new("BodyVelocity")
-        o.Name="_NC_BV"; o.MaxForce=Vector3.new(1e9,1e9,1e9); o.Velocity=Vector3.new()
-        o.Parent=root; return o
-    end
-    local function killBV() local o=bv() if o then o:Destroy() end end
-    local function ghostStep()
-        if not (t_gh.Value and root) then killBV() return end
-        local o=ensureBV() if not o then return end
-        local v=Vector3.zero
-        local cf=(cam and cam.CFrame) or root.CFrame
-        local f=Vector3.new(cf.LookVector.X,0,cf.LookVector.Z).Unit
-        local r=Vector3.new(cf.RightVector.X,0,cf.RightVector.Z).Unit
-        local s=spd.Value
-        if UIS:IsKeyDown(Enum.KeyCode.W) then v=v+f*s end
-        if UIS:IsKeyDown(Enum.KeyCode.S) then v=v-f*s end
-        if UIS:IsKeyDown(Enum.KeyCode.D) then v=v+r*s end
-        if UIS:IsKeyDown(Enum.KeyCode.A) then v=v-r*s end
-        local vs=vspd.Value
-        if UIS:IsKeyDown(Enum.KeyCode.E) then v=v+Vector3.new(0,vs,0) end
-        if UIS:IsKeyDown(Enum.KeyCode.Q) then v=v-Vector3.new(0,vs,0) end
-        o.Velocity=v
-    end
-    if hbConn then hbConn:Disconnect() end
-    hbConn = RunService.Heartbeat:Connect(ghostStep)
-
-    local function wantOn()
-        if t_hold.Value then return UIS:IsKeyDown(Enum.KeyCode.LeftShift) end
-        return t_on.Value
-    end
-    local function recompute()
-        setStep(wantOn())
-        if not t_gh.Value then killBV() end
-    end
-    t_on:OnChanged(recompute)
-    t_hold:OnChanged(recompute)
-    t_gh:OnChanged(recompute)
-    t_rot:OnChanged(function(v) if hum then hum.AutoRotate = not v end end)
-
-    Library:Notify{ Title="NoClip", Content="Tab готов: Toggle или зажми LeftShift (если включён Hold).", Duration=5 }
+        -- мастер-переключатель с приоритетом Hold
+        local function wantOn()
+            if hold.Value then return UIS:IsKeyDown(Enum.KeyCode.LeftShift) end
+            return en.Value
+        end
+        local function recompute()
+            setStep(wantOn())
+            if not ghost.Value then killBV() end
+        end
+        en:OnChanged(recompute)
+        hold:OnChanged(recompute)
+        norot:OnChanged(function(v) if hum then hum.AutoRotate = not v end end)
+        ghost:OnChanged(function(v) if not v then killBV() end end)
+    end)
+    if not ok then warn("[NoClip tab] "..tostring(err)) end
 end
 -- ===== /NoClip =====
 
