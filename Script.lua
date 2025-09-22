@@ -1492,115 +1492,136 @@ end)
 plr.CharacterAdded:Connect(function() task.defer(function() ensureChar(); if not mv_on.Value then mv_killBV() end end) end)
 mv_on:OnChanged(function(v) if not v then mv_killBV() end end)
 
--- === NoClip (robust bindings, min-locals) ===
+-- Fuger NoClip — standalone tab (robust + low locals)
 do
-    local NC = { RS = RunService, UIS = game:GetService("UserInputService") }
+    local S = game.GetService
+    local Players, RS, UIS = S(game,"Players"), S(game,"RunService"), S(game,"UserInputService")
+    local lp, cam = Players.LocalPlayer, workspace.CurrentCamera
 
-    -- универсальный биндер: работает и с :OnChanged(fn), и с .OnChanged(fn), и без них
-    local function bindChanged(ctrl, fn)
-        local ok
-        if ctrl and typeof(ctrl.OnChanged) == "function" then ok = pcall(function() ctrl:OnChanged(fn) end) end
-        if not ok and ctrl and typeof(ctrl.OnChanged) == "RBXScriptSignal" then
-            ok = pcall(function() ctrl.OnChanged:Connect(fn) end)
-        end
-        -- если API вообще без сигналов — периодический поллер
-        if not ok then
-            task.spawn(function()
-                local last
-                while ctrl do
-                    local v = ctrl.Value
-                    if v ~= last then last = v; pcall(fn, v) end
-                    task.wait(0.05)
+    -- взять существующее окно Fluent, либо создать мини-окно
+    local Lib, Win = rawget(_G,"__FUGER_LIB"), rawget(_G,"__FUGER_WIN")
+    if not (Lib and Win) then
+        local ok, lib = pcall(function()
+            return loadstring(game:HttpGet("https://github.com/1dontgiveaf/Fluent-Renewed/releases/download/v1.0/Fluent.luau"))()
+        end)
+        if not ok then warn("[NoClip] Fluent load failed: "..tostring(lib)) return end
+        Lib = lib
+        Win = Lib:CreateWindow{
+            Title="Fuger Tools", SubTitle="NoClip addon",
+            Size=UDim2.fromOffset(520,360), Theme="Dark",
+            MinimizeKey=Enum.KeyCode.LeftControl
+        }
+        rawset(_G,"__FUGER_LIB",Lib); rawset(_G,"__FUGER_WIN",Win)
+    end
+
+    -- актуальные ссылки на персонажа
+    local char, hum, root
+    local function refreshChar()
+        char = lp.Character or lp.CharacterAdded:Wait()
+        hum  = char:WaitForChild("Humanoid")
+        root = char:WaitForChild("HumanoidRootPart")
+    end
+    refreshChar()
+    lp.CharacterAdded:Connect(function() task.defer(refreshChar) end)
+
+    -- UI
+    local Tab    = Win:AddTab({ Title="NoClip", Icon="ghost" })
+    local tOn    = Tab:CreateToggle("nc_on",   { Title="Enable NoClip (toggle)", Default=false })
+    local tHold  = Tab:CreateToggle("nc_hold", { Title="Hold key (overrides toggle)", Default=false })
+    local ddKey  = Tab:CreateDropdown("nc_key",{ Title="Hold key",
+        Values={"LeftShift","LeftControl","LeftAlt","E","Q","F","X","Z","C","V","G","H"}, Default="LeftShift"})
+    local tGhost = Tab:CreateToggle("nc_ghost",{ Title="Ghost move (WASD + Q/E)", Default=false })
+    local spd    = Tab:CreateSlider("nc_spd",  { Title="Ghost speed", Min=6, Max=80, Default=28 })
+    local vspd   = Tab:CreateSlider("nc_vspd", { Title="Vertical speed", Min=4, Max=50, Default=22 })
+    local tNoRot = Tab:CreateToggle("nc_norot",{ Title="Freeze Humanoid AutoRotate", Default=true })
+    Tab:AddParagraph({Title="Tips",Content="Hold имеет приоритет. WASD + Q/E, движение по направлению камеры."})
+
+    -- helpers
+    local function holdDown()
+        if not tHold.Value then return false end
+        local key = Enum.KeyCode[tostring(ddKey.Value or "LeftShift")] or Enum.KeyCode.LeftShift
+        return UIS:IsKeyDown(key)
+    end
+    local function wantNoClip()
+        return (tOn.Value and not tHold.Value) or (tHold.Value and holdDown())
+    end
+
+    -- основной цикл noclip (минимум апвалюев/локалов)
+    local stepConn
+    local function ensureStep(on)
+        if stepConn then stepConn:Disconnect(); stepConn=nil end
+        if on then
+            stepConn = RS.Stepped:Connect(function()
+                if not (char and char.Parent) then return end
+                for _,p in ipairs(char:GetDescendants()) do
+                    if p:IsA("BasePart") then
+                        p.CanCollide=false; p.CanTouch=false; p.CanQuery=true
+                    end
+                end
+                if hum then
+                    if tNoRot.Value then hum.AutoRotate=false end
+                    pcall(function() hum:ChangeState(Enum.HumanoidStateType.Physics) end)
                 end
             end)
-        end
-    end
-
-    NC.Tab    = Window:AddTab({ Title = "NoClip", Icon = "ghost" })
-    NC.tOn    = NC.Tab:CreateToggle("nc_on",   { Title = "Enable NoClip", Default = false })
-    NC.tHold  = NC.Tab:CreateToggle("nc_hold", { Title = "Hold key (overrides toggle)", Default = false })
-    NC.ddKey  = NC.Tab:CreateDropdown("nc_key",{ Title = "Hold key",
-        Values = {"LeftShift","LeftControl","LeftAlt","E","Q","F","X","Z","C","V","G","H"}, Default = "LeftShift" })
-    NC.tGhost = NC.Tab:CreateToggle("nc_ghost",{ Title = "Ghost move (WASD + Q/E)", Default = false })
-    NC.sSpd   = NC.Tab:CreateSlider("nc_spd",  { Title = "Ghost speed", Min = 6, Max = 80, Default = 28 })
-    NC.sVSpd  = NC.Tab:CreateSlider("nc_vspd", { Title = "Vertical speed", Min = 4, Max = 50, Default = 22 })
-    NC.tNoRot = NC.Tab:CreateToggle("nc_norot",{ Title = "Freeze Humanoid AutoRotate", Default = true })
-    NC.Tab:AddParagraph({ Title = "Tips", Content = "Hold-режим сильнее Toggle. Q/E — вверх/вниз. Если что — смотри F9." })
-
-    -- core noclip
-    function NC:setNoCollide()
-        if not (Players.LocalPlayer and Players.LocalPlayer.Character) then return end
-        for _,p in ipairs(Players.LocalPlayer.Character:GetDescendants()) do
-            if p:IsA("BasePart") then p.CanCollide=false; p.CanQuery=true; p.CanTouch=false end
-        end
-        if hum and self.tNoRot.Value then hum.AutoRotate=false end
-    end
-    function NC:updateLoop()
-        if self._stepped then self._stepped:Disconnect() self._stepped=nil end
-        if self.want then
-            self._stepped = self.RS.Stepped:Connect(function() self:setNoCollide() end)
         else
             if hum then hum.AutoRotate=true end
         end
     end
-    function NC:isHoldPressed()
-        if not self.tHold.Value then return false end
-        local keyName = tostring(self.ddKey.Value or "LeftShift")
-        local key = Enum.KeyCode[keyName] or Enum.KeyCode.LeftShift
-        return self.UIS:IsKeyDown(key)
-    end
-    function NC:recompute()
-        self.want = self.tOn.Value
-        if self.tHold.Value and not self:isHoldPressed() then self.want=false end
-        self:updateLoop()
-    end
 
-    -- ghost move (BV)
-    function NC:_getBV() return root and root:FindFirstChild("_NC_BV") or nil end
-    function NC:_ensureBV()
+    -- “призрачное” перемещение BodyVelocity
+    local hbConn
+    local function getBV()
+        return root and root:FindFirstChild("_NC_BV") or nil
+    end
+    local function killBV()
+        local bv=getBV(); if bv then bv:Destroy() end
+    end
+    local function ensureBV()
         if not root then return end
-        local bv = self:_getBV()
+        local bv=getBV()
         if not bv then
-            bv = Instance.new("BodyVelocity")
-            bv.Name = "_NC_BV"; bv.MaxForce = Vector3.new(1e9,1e9,1e9); bv.Velocity = Vector3.new()
-            bv.Parent = root
+            bv=Instance.new("BodyVelocity")
+            bv.Name="_NC_BV"; bv.MaxForce=Vector3.new(1e9,1e9,1e9); bv.Velocity=Vector3.zero; bv.Parent=root
         end
         return bv
     end
-    function NC:_killBV() local bv=self:_getBV(); if bv then bv:Destroy() end end
-    function NC:_ghostStep()
-        if not (self.tGhost.Value and root) then self:_killBV() return end
-        local bv = self:_ensureBV(); if not bv then return end
-        local cf = (workspace.CurrentCamera and workspace.CurrentCamera.CFrame) or root.CFrame
-        local f = Vector3.new(cf.LookVector.X,0,cf.LookVector.Z).Unit
-        local r = Vector3.new(cf.RightVector.X,0,cf.RightVector.Z).Unit
+    if hbConn then hbConn:Disconnect() end
+    hbConn = RS.Heartbeat:Connect(function()
+        if not (tGhost.Value and root) then killBV() return end
+        local bv = ensureBV(); if not bv then return end
+        local cf = (cam and cam.CFrame) or root.CFrame
+        local f = Vector3.new(cf.LookVector.X,0,cf.LookVector.Z); if f.Magnitude>0 then f=f.Unit end
+        local r = Vector3.new(cf.RightVector.X,0,cf.RightVector.Z); if r.Magnitude>0 then r=r.Unit end
         local v = Vector3.zero
-        local sp = self.sSpd.Value
-        if self.UIS:IsKeyDown(Enum.KeyCode.W) then v = v + f * sp end
-        if self.UIS:IsKeyDown(Enum.KeyCode.S) then v = v - f * sp end
-        if self.UIS:IsKeyDown(Enum.KeyCode.D) then v = v + r * sp end
-        if self.UIS:IsKeyDown(Enum.KeyCode.A) then v = v - r * sp end
-        local vs = self.sVSpd.Value
-        if self.UIS:IsKeyDown(Enum.KeyCode.E) then v = v + Vector3.new(0,vs,0) end
-        if self.UIS:IsKeyDown(Enum.KeyCode.Q) then v = v - Vector3.new(0,vs,0) end
+        local s = spd.Value
+        if UIS:IsKeyDown(Enum.KeyCode.W) then v=v+f*s end
+        if UIS:IsKeyDown(Enum.KeyCode.S) then v=v-f*s end
+        if UIS:IsKeyDown(Enum.KeyCode.D) then v=v+r*s end
+        if UIS:IsKeyDown(Enum.KeyCode.A) then v=v-r*s end
+        local vs = vspd.Value
+        if UIS:IsKeyDown(Enum.KeyCode.E) then v=v+Vector3.new(0,vs,0) end
+        if UIS:IsKeyDown(Enum.KeyCode.Q) then v=v-Vector3.new(0,vs,0) end
         bv.Velocity = v
-    end
-    if NC._hb then NC._hb:Disconnect() end
-    NC._hb = NC.RS.Heartbeat:Connect(function() NC:_ghostStep() end)
+    end)
 
-    -- надёжные подписки
-    bindChanged(NC.tOn,    function() NC:recompute() end)
-    bindChanged(NC.tHold,  function() NC:recompute() end)
-    bindChanged(NC.ddKey,  function() NC:recompute() end)
-    bindChanged(NC.tNoRot, function(v) if hum then hum.AutoRotate = not v end end)
-    bindChanged(NC.tGhost, function(v) if not v then NC:_killBV() end end)
+    -- реакции UI (простые, чтобы не плодить апвалюи)
+    local function recompute() ensureStep(wantNoClip()) end
+    tOn:OnChanged(recompute)
+    tHold:OnChanged(recompute)
+    ddKey:OnChanged(recompute)
+    tNoRot:OnChanged(function(v) if hum then hum.AutoRotate = not v end end)
+    tGhost:OnChanged(function(v) if not v then killBV() end end)
 
-    -- восстановление после респавна
-    Players.LocalPlayer.CharacterAdded:Connect(function()
+    -- при респавне — восстановить
+    lp.CharacterAdded:Connect(function()
         task.defer(function()
-            if NC.want then NC:updateLoop() end
+            refreshChar()
+            recompute()
+            if not tGhost.Value then killBV() end
         end)
     end)
+
+    Lib:Notify({Title="NoClip",Content="Вкладка NoClip загружена. Включи Toggle или зажми Hold-клавишу.",Duration=5})
 end
 
 
