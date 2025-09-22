@@ -1492,6 +1492,118 @@ end)
 plr.CharacterAdded:Connect(function() task.defer(function() ensureChar(); if not mv_on.Value then mv_killBV() end end) end)
 mv_on:OnChanged(function(v) if not v then mv_killBV() end end)
 
+-- === NoClip (robust bindings, min-locals) ===
+do
+    local NC = { RS = RunService, UIS = game:GetService("UserInputService") }
+
+    -- универсальный биндер: работает и с :OnChanged(fn), и с .OnChanged(fn), и без них
+    local function bindChanged(ctrl, fn)
+        local ok
+        if ctrl and typeof(ctrl.OnChanged) == "function" then ok = pcall(function() ctrl:OnChanged(fn) end) end
+        if not ok and ctrl and typeof(ctrl.OnChanged) == "RBXScriptSignal" then
+            ok = pcall(function() ctrl.OnChanged:Connect(fn) end)
+        end
+        -- если API вообще без сигналов — периодический поллер
+        if not ok then
+            task.spawn(function()
+                local last
+                while ctrl do
+                    local v = ctrl.Value
+                    if v ~= last then last = v; pcall(fn, v) end
+                    task.wait(0.05)
+                end
+            end)
+        end
+    end
+
+    NC.Tab    = Window:AddTab({ Title = "NoClip", Icon = "ghost" })
+    NC.tOn    = NC.Tab:CreateToggle("nc_on",   { Title = "Enable NoClip", Default = false })
+    NC.tHold  = NC.Tab:CreateToggle("nc_hold", { Title = "Hold key (overrides toggle)", Default = false })
+    NC.ddKey  = NC.Tab:CreateDropdown("nc_key",{ Title = "Hold key",
+        Values = {"LeftShift","LeftControl","LeftAlt","E","Q","F","X","Z","C","V","G","H"}, Default = "LeftShift" })
+    NC.tGhost = NC.Tab:CreateToggle("nc_ghost",{ Title = "Ghost move (WASD + Q/E)", Default = false })
+    NC.sSpd   = NC.Tab:CreateSlider("nc_spd",  { Title = "Ghost speed", Min = 6, Max = 80, Default = 28 })
+    NC.sVSpd  = NC.Tab:CreateSlider("nc_vspd", { Title = "Vertical speed", Min = 4, Max = 50, Default = 22 })
+    NC.tNoRot = NC.Tab:CreateToggle("nc_norot",{ Title = "Freeze Humanoid AutoRotate", Default = true })
+    NC.Tab:AddParagraph({ Title = "Tips", Content = "Hold-режим сильнее Toggle. Q/E — вверх/вниз. Если что — смотри F9." })
+
+    -- core noclip
+    function NC:setNoCollide()
+        if not (Players.LocalPlayer and Players.LocalPlayer.Character) then return end
+        for _,p in ipairs(Players.LocalPlayer.Character:GetDescendants()) do
+            if p:IsA("BasePart") then p.CanCollide=false; p.CanQuery=true; p.CanTouch=false end
+        end
+        if hum and self.tNoRot.Value then hum.AutoRotate=false end
+    end
+    function NC:updateLoop()
+        if self._stepped then self._stepped:Disconnect() self._stepped=nil end
+        if self.want then
+            self._stepped = self.RS.Stepped:Connect(function() self:setNoCollide() end)
+        else
+            if hum then hum.AutoRotate=true end
+        end
+    end
+    function NC:isHoldPressed()
+        if not self.tHold.Value then return false end
+        local keyName = tostring(self.ddKey.Value or "LeftShift")
+        local key = Enum.KeyCode[keyName] or Enum.KeyCode.LeftShift
+        return self.UIS:IsKeyDown(key)
+    end
+    function NC:recompute()
+        self.want = self.tOn.Value
+        if self.tHold.Value and not self:isHoldPressed() then self.want=false end
+        self:updateLoop()
+    end
+
+    -- ghost move (BV)
+    function NC:_getBV() return root and root:FindFirstChild("_NC_BV") or nil end
+    function NC:_ensureBV()
+        if not root then return end
+        local bv = self:_getBV()
+        if not bv then
+            bv = Instance.new("BodyVelocity")
+            bv.Name = "_NC_BV"; bv.MaxForce = Vector3.new(1e9,1e9,1e9); bv.Velocity = Vector3.new()
+            bv.Parent = root
+        end
+        return bv
+    end
+    function NC:_killBV() local bv=self:_getBV(); if bv then bv:Destroy() end end
+    function NC:_ghostStep()
+        if not (self.tGhost.Value and root) then self:_killBV() return end
+        local bv = self:_ensureBV(); if not bv then return end
+        local cf = (workspace.CurrentCamera and workspace.CurrentCamera.CFrame) or root.CFrame
+        local f = Vector3.new(cf.LookVector.X,0,cf.LookVector.Z).Unit
+        local r = Vector3.new(cf.RightVector.X,0,cf.RightVector.Z).Unit
+        local v = Vector3.zero
+        local sp = self.sSpd.Value
+        if self.UIS:IsKeyDown(Enum.KeyCode.W) then v = v + f * sp end
+        if self.UIS:IsKeyDown(Enum.KeyCode.S) then v = v - f * sp end
+        if self.UIS:IsKeyDown(Enum.KeyCode.D) then v = v + r * sp end
+        if self.UIS:IsKeyDown(Enum.KeyCode.A) then v = v - r * sp end
+        local vs = self.sVSpd.Value
+        if self.UIS:IsKeyDown(Enum.KeyCode.E) then v = v + Vector3.new(0,vs,0) end
+        if self.UIS:IsKeyDown(Enum.KeyCode.Q) then v = v - Vector3.new(0,vs,0) end
+        bv.Velocity = v
+    end
+    if NC._hb then NC._hb:Disconnect() end
+    NC._hb = NC.RS.Heartbeat:Connect(function() NC:_ghostStep() end)
+
+    -- надёжные подписки
+    bindChanged(NC.tOn,    function() NC:recompute() end)
+    bindChanged(NC.tHold,  function() NC:recompute() end)
+    bindChanged(NC.ddKey,  function() NC:recompute() end)
+    bindChanged(NC.tNoRot, function(v) if hum then hum.AutoRotate = not v end end)
+    bindChanged(NC.tGhost, function(v) if not v then NC:_killBV() end end)
+
+    -- восстановление после респавна
+    Players.LocalPlayer.CharacterAdded:Connect(function()
+        task.defer(function()
+            if NC.want then NC:updateLoop() end
+        end)
+    end)
+end
+
+
 -- ========= [ Finish / Autoload ] =========
 Window:SelectTab(1)
 Library:Notify{ Title="Fuger Hub", Content="Loaded: Configs + Survival + Gold + Route + Farming + Heal + Combat", Duration=6 }
